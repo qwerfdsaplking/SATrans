@@ -56,7 +56,6 @@ def map_history_data():
         train_uids = train_acc_feat[0]
         train_fids = train_acc_feat[1]
         train_scores = train_acc_feat[2]
-        # 过滤权重小的边，如何过滤？每个user限定5条边？还是统一用threshold去过滤
 
         name = 'test'
         test_acc_feat = load_pkl('/home/featurize/work/history/%s_%s_unmapped.pkl' % (col, name))

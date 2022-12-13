@@ -120,19 +120,21 @@ def create_embedding_matrix(feature_columns, init_std=0.0001, linear=False, spar
 
     return embedding_dict.to(device)
 
-
+#
 class BaseModel(nn.Module):
     def __init__(self, linear_feature_columns, dnn_feature_columns, l2_reg_linear=1e-5, l2_reg_embedding=1e-5,
-                 init_std=0.0001, seed=1024, task='binary', device='cpu', gpus=None,
-                 flag=None,domain_column=None,num_domains=None, meta_dnn_hidden_units=(32,64,32)):
+                 init_std=0.0001, seed=1024, task='binary', device='cpu', gpus=None, flag=None,
+                 domain_column=None,
+                 num_domains=None, meta_dnn_hidden_units=(32,64,32)):
 
         super(BaseModel, self).__init__()
 
         #******************meta module**************************
+        self.flag = flag
+        self.domain_column = domain_column
+        self.embedding_dim = dnn_feature_columns[0].embedding_dim
         if domain_column:
-            self.flag=flag
-            self.domain_column=domain_column
-            self.embedding_dim=dnn_feature_columns[0].embedding_dim
+
             self.domain_embeddings = nn.Embedding(num_domains+1, self.embedding_dim)
             self.meta_dnn_hidden_units = meta_dnn_hidden_units
             meta_param_size=sum([meta_dnn_hidden_units[i]*meta_dnn_hidden_units[i+1] for i in range(len(meta_dnn_hidden_units)-1)])
@@ -315,8 +317,8 @@ class BaseModel(nn.Module):
                         reg_loss = self.get_regularization_loss()
 
                         total_loss = loss + reg_loss + self.aux_loss
-                        if step_num%10==0 and 'test' in self.flag:
-                            print('\ntest out: %f' %total_loss.item())
+                        #if step_num%10==0:
+                        #    print('\ntest out: %f' %total_loss.item())
                             #assert 1==0
                         loss_epoch += loss.item()
                         total_loss_epoch += total_loss.item()
@@ -395,7 +397,7 @@ class BaseModel(nn.Module):
             eval_result[name] = metric_fun(y, pred_ans)
         return eval_result
 
-    def predict(self, x, batch_size=256):
+    def predict(self, x, batch_size=256,y=None,domain_ids=None):
         """
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
@@ -415,12 +417,44 @@ class BaseModel(nn.Module):
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
         pred_ans = []
+        if 'showattn' in self.flag:
+            self.num_domains_list=[3]
+            self.attn_list_pos = [[0.0] * self.num_domains_list[0] for _ in range(self.att_layer_num)]
+            self.attn_list_neg = [[0.0] * self.num_domains_list[0] for _ in range(self.att_layer_num)]
+            self.attn_list_all = [[0.0] * self.num_domains_list[0] for _ in range(self.att_layer_num)]
+
+            offset=0
         with torch.no_grad():
+
             for _, x_test in tqdm(enumerate(test_loader)):
                 x = x_test[0].to(self.device).float()
 
                 y_pred = model(x).cpu().data.numpy()  # .squeeze()
+
+                if 'showattn' in self.flag:
+                    y_label = y[offset:offset+x.shape[0]]
+                    domain_ids_batch = domain_ids[offset:offset+x.shape[0]]
+                    offset+=x.shape[0]
+                    if domain_ids.min()==1:
+                        bias=1
+                    else:
+                        bias=0
+                    for i in range(self.att_layer_num):
+                        for j in range(self.num_domains_list[0]):
+                            self.attn_list_pos[i][j]+=model.int_layers[i].normalized_att_scores.detach()[:,(y_label==1)&(domain_ids_batch==(j+bias)),::].sum(1)
+                            self.attn_list_neg[i][j]+=model.int_layers[i].normalized_att_scores.detach()[:,(y_label==0)&(domain_ids_batch==(j+bias)),::].sum(1)
+                            self.attn_list_all[i][j]+=model.int_layers[i].normalized_att_scores.detach()[:,(domain_ids_batch==(j+bias)),::].sum(1)
                 pred_ans.append(y_pred)
+
+        if 'showattn' in self.flag:
+            for i in range(self.att_layer_num):
+                for j in range(self.num_domains_list[0]):
+                    self.attn_list_pos[i][j]/=((domain_ids==(j+bias))&(y==1)).sum()
+                    self.attn_list_pos[i][j]=self.attn_list_pos[i][j].cpu().numpy()
+                    self.attn_list_neg[i][j]/=((domain_ids==(j+bias))&(y==0)).sum()
+                    self.attn_list_neg[i][j]=self.attn_list_neg[i][j].cpu().numpy()
+                    self.attn_list_all[i][j]/=(domain_ids==(j+bias)).sum()
+                    self.attn_list_all[i][j]=self.attn_list_all[i][j].cpu().numpy()
 
         return np.concatenate(pred_ans).astype("float64")
 

@@ -12,7 +12,14 @@ import torch.nn as nn
 from .mtl_basemodel import BaseModel
 from deepctr_torch.inputs import combined_dnn_input
 from deepctr_torch.layers import DNN, PredictionLayer
+from .meta_trans_v2 import SelfAttention_Layer
 
+
+def concat_fun(inputs, axis=-1):
+    if len(inputs) == 1:
+        return inputs[0]
+    else:
+        return torch.cat(inputs, dim=axis)
 
 class PLE(BaseModel):
     """Instantiates the multi level of Customized Gate Control of Progressive Layered Extraction architecture.
@@ -44,12 +51,13 @@ class PLE(BaseModel):
                  expert_dnn_hidden_units=(256, 128), gate_dnn_hidden_units=(64,), tower_dnn_hidden_units=(64,),
                  l2_reg_linear=0.00001, l2_reg_embedding=0.00001, l2_reg_dnn=0, init_std=0.0001, seed=1024,
                  dnn_dropout=0, dnn_activation='relu', dnn_use_bn=False, task_types=('binary', 'binary'),
-                 task_names=('ctr', 'ctcvr'), device='cpu', gpus=None,domain_column=None):
+                 task_names=('ctr', 'ctcvr'), device='cpu', gpus=None,domain_column=None,flag=None):
         super(PLE, self).__init__(linear_feature_columns=[], dnn_feature_columns=dnn_feature_columns,
                                   l2_reg_linear=l2_reg_linear, l2_reg_embedding=l2_reg_embedding, init_std=init_std,
                                   seed=seed, device=device, gpus=gpus)
         self.num_tasks = len(task_names)
         self.domain_column=domain_column
+        self.flag=flag
 
         if self.num_tasks <= 1:
             raise ValueError("num_tasks must be greater than 1!")
@@ -61,6 +69,10 @@ class PLE(BaseModel):
         for task_type in task_types:
             if task_type not in ['binary', 'regression']:
                 raise ValueError("task must be binary or regression, {} is illegal".format(task_type))
+        if 'usetrans' in self.flag:
+            self.int_layers = nn.ModuleList(
+                [SelfAttention_Layer(self.embedding_dim, 4, True, device=device) for _ in range(3)])
+
 
         self.specific_expert_num = specific_expert_num
         self.shared_expert_num = shared_expert_num
@@ -198,7 +210,22 @@ class PLE(BaseModel):
     def forward(self, X):
         sparse_embedding_list, dense_value_list = self.input_from_feature_columns(X, self.dnn_feature_columns,
                                                                                   self.embedding_dict)
-        dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+        #dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+
+        if 'usetrans' in self.flag:
+            att_input = concat_fun(sparse_embedding_list, axis=1)
+            for layer in self.int_layers:
+                att_input = layer(att_input)
+            att_output = torch.flatten(att_input, start_dim=1)
+            if len(dense_value_list)>0:
+                dense_input = concat_fun(dense_value_list, axis=1)
+                dnn_input = concat_fun([att_output, dense_input])
+            else:
+                dnn_input=att_output
+
+        else:
+            dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+
 
         # repeat `dnn_input` for several times to generate cgc input
         ple_inputs = [dnn_input] * (self.num_tasks + 1)  # [task1, task2, ... taskn, shared task]

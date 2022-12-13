@@ -11,7 +11,7 @@ import torch.nn as nn
 
 
 
-from deepctr_torch.models.basemodel import BaseModel
+from .basemodel import BaseModel
 from deepctr_torch.inputs import combined_dnn_input
 from deepctr_torch.layers import DNN
 
@@ -41,11 +41,13 @@ class WDL(BaseModel):
                  l2_reg_linear=1e-5,
                  l2_reg_embedding=1e-5, l2_reg_dnn=0, init_std=0.0001, seed=1024, dnn_dropout=0, dnn_activation='relu',
                  dnn_use_bn=False,
-                 task='binary', device='cpu', gpus=None):
+                 task='binary', device='cpu', gpus=None,flag=None,domain_column=None,num_domains=None,):
 
         super(WDL, self).__init__(linear_feature_columns, dnn_feature_columns, l2_reg_linear=l2_reg_linear,
                                   l2_reg_embedding=l2_reg_embedding, init_std=init_std, seed=seed, task=task,
-                                  device=device, gpus=gpus)
+                                  device=device, gpus=gpus,flag=flag,domain_column=domain_column,num_domains=num_domains)
+        self.flag=flag
+        self.domain_column=domain_column
 
         self.use_dnn = len(dnn_feature_columns) > 0 and len(
             dnn_hidden_units) > 0

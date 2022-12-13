@@ -55,7 +55,7 @@ class AFM(BaseModel):
     def forward(self, X):
 
         sparse_embedding_list, _ = self.input_from_feature_columns(X, self.dnn_feature_columns,
-                                                                   self.embedding_dict, support_dense=False)
+                                                                   self.embedding_dict, support_dense=True)
         # *************metanet**************
         if 'metatrans' in self.flag:
             sparse_input = torch.cat(sparse_embedding_list, dim=1)

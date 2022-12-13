@@ -72,8 +72,7 @@ class MetaNet(nn.Module):
         self.ffn_act_func = nn.ReLU()
         self.flag=flag
         if self.use_norm:
-            self.ffn_layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim, eps=1e-6) for _ in range(1)])
-
+            self.ffn_layer_norm = nn.LayerNorm(hidden_dim, eps=1e-6)
 
     def forward(self, x, mlp_params=None):#x BxLxd,  mlp1  Bxdx2d   mlp2  Bx2dxd
         weight_list = []
@@ -100,7 +99,7 @@ class MetaNet(nn.Module):
         x=self.dropout(x)
         x+=residual
         if self.use_norm:
-            x = self.ffn_layer_norms[0](x)
+            x = self.ffn_layer_norm(x)
         return x
 
 
@@ -175,3 +174,137 @@ class MDR_BatchNorm(_NormBase):
                 "expected 2D or 3D input (got {}D input)".format(input.dim())
             )
 
+
+class SelfAttention_Layer(nn.Module):
+
+    def __init__(self, embedding_size, head_num=2, use_res=True, scaling=True, seed=1024, device='cpu'):
+        super(SelfAttention_Layer, self).__init__()
+        if head_num <= 0:
+            raise ValueError('head_num must be a int > 0')
+        if embedding_size % head_num != 0:
+            raise ValueError('embedding_size is not an integer multiple of head_num!')
+        self.att_embedding_size = embedding_size // head_num
+        self.head_num = head_num
+        self.use_res = use_res
+        self.scaling = scaling
+        self.seed = seed
+
+        self.W_Query = nn.Parameter(torch.Tensor(embedding_size, embedding_size))
+        self.W_Key = nn.Parameter(torch.Tensor(embedding_size, embedding_size))
+        self.W_Value = nn.Parameter(torch.Tensor(embedding_size, embedding_size))
+        self.W_Out = nn.Parameter(torch.Tensor(embedding_size, embedding_size))
+
+        self.attn_dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(0.1)
+        self.layer_norm = nn.LayerNorm(embedding_size, eps=1e-6)
+
+        if self.use_res:
+            self.W_Res = nn.Parameter(torch.Tensor(embedding_size, embedding_size))
+        for tensor in self.parameters():
+            nn.init.normal_(tensor, mean=0.0, std=0.05)
+
+        self.to(device)
+
+    def forward(self, inputs):
+
+        if len(inputs.shape) != 3:
+            raise ValueError(
+                "Unexpected inputs dimensions %d, expect to be 3 dimensions" % (len(inputs.shape)))
+        # None F D
+        querys = torch.tensordot(inputs, self.W_Query, dims=([-1], [0]))
+        keys = torch.tensordot(inputs, self.W_Key, dims=([-1], [0]))
+        values = torch.tensordot(inputs, self.W_Value, dims=([-1], [0]))
+
+        # head_num None F D/head_num
+        querys = torch.stack(torch.split(querys, self.att_embedding_size, dim=2))
+        keys = torch.stack(torch.split(keys, self.att_embedding_size, dim=2))
+        values = torch.stack(torch.split(values, self.att_embedding_size, dim=2))
+
+        inner_product = torch.einsum('bnik,bnjk->bnij', querys, keys)  # head_num None F F
+        if self.scaling:
+            inner_product /= self.att_embedding_size ** 0.5
+        self.normalized_att_scores = self.attn_dropout(F.softmax(inner_product, dim=-1))  # head_num None F F
+
+        result = torch.matmul(self.normalized_att_scores, values)  # head_num None F D/head_num
+
+        result = torch.cat(torch.split(result, 1, ), dim=-1)
+        result = torch.squeeze(result, dim=0)  # None F D
+        result = self.dropout(result)#=======
+        if self.use_res:
+            result += torch.tensordot(inputs, self.W_Res, dims=([-1], [0]))
+        result = F.relu(result)
+        result = self.layer_norm(result)#===
+
+        return result
+
+
+
+
+test_visual_ids=[ 1453289, 42966022, 24205824, 16064524, 25503516,  3816928,
+        7754202, 16947958, 41552490, 31733916,  9384867, 42806083,
+        5328450, 21453215, 34663885, 17948903,  6822311,  1937201,
+        4410285,   201744, 15171505,  4885268, 15800351, 13915527,
+       27213000, 35978128, 28289712, 25123397, 25770247, 27379605,
+       13760316, 10768337,   452273,  5274535, 35171148, 34114659,
+        4660627, 23625906, 21004494, 28949905,  2653287, 21004523,
+        2598530,  2058354,  4361359, 30024448, 21854660,   542100,
+       16140508, 14360209,  6944232,  3417702, 24046308, 24350916,
+       11629049, 11187604, 11629056, 11187612, 13184828,  7152854,
+       33085373, 27794211, 24050906, 39595420,  8436213, 12633431,
+       23422455, 18402585, 37030610, 27590084, 15272070, 13201925,
+        6642612,  6527116,  5959166,  3252713, 42670791, 17064975,
+        7826776,  6486620,  6678322,  5464538,  8589534,  4621928,
+       22239583,  4621982,  1999744, 10213112, 12216345, 15436084,
+       13461530, 34084101, 40170298, 34475377, 15591011, 10101370,
+       15349269, 28524049, 17504711, 15349277,  3775317,  2815609,
+       36539077, 42794663, 34870909, 29157348, 34870923, 29157361,
+       13685414,  3031651, 33378505, 37496073, 12323623,  1473535,
+       12323624,  1473550, 21577131, 18077461, 17589077,   594323,
+        7054643, 27366202,  9829585,  3914425, 15037633,  3485856,
+        4354720, 15268491,  6452190,   200160, 20131983, 19348389,
+       27414407, 23073182,   623982, 11383393,   365066, 34383407,
+       24621639, 11927453, 33979305, 24556419, 33979178, 33928232,
+       34880803,  6376177,   630384, 15631931,  5951692,  7208557,
+       15447211,   823224, 17987370, 20497886,  7104972, 11261277,
+        4139805,  2518659, 15080545,  7805953, 12295454,  3571874,
+       12295473,  3571892, 10182573,  9900270,  2777486, 16264490,
+       18163604, 18088934, 39725987, 39497285,  3848595,  1177255,
+        2490455,  8463106, 20776222, 22872501, 14865644, 27189783,
+       27357813, 32926447, 15976511,  9037206, 16599797,  4066064,
+         233709, 14820183, 39580645, 22254404, 21789170, 22254370,
+       12251469, 10424663,  2228191, 13618755,  9990946,  4544418,
+        8218479,  7867052, 13714297,  6830214, 13714394,  6830242,
+       33087538,  8930753,  6766948, 12542448,  6766965, 12542468,
+       15054031, 22726955, 42554055, 32536104,  2862756,  3599094,
+        1995636,   430449, 26060671, 20681516, 16312505, 28367442,
+       27610710,  1577758,  7035973,  1076148,  6505221, 12011328,
+        6505225, 12011351, 35463824, 35597362, 11412430,  6738224,
+       17175329, 35493826,  2708743,  6845084, 15823425, 16891493,
+        7970124,  1993903,  1993917,  7970139, 14002840, 12057804,
+       15992035, 23855897, 37358266, 32748952, 15288040, 13791942,
+        9772821, 14922582,  3962870,  5702451, 18587646, 24862968,
+       11718405, 13312948,  1424320,  3322337,  9908811, 14267302,
+        4129804, 16178976,  6328636, 22669267, 22616032, 22469986,
+       11918118,  4032157,  8726615, 14049473, 13442974, 15774644,
+         996158, 13545838, 11434325,  5396649, 33397928, 29015019,
+        7251893,  7193691,  3749412,  4288536, 19161122, 20572306,
+       23708892, 11485419, 10235633,  3015786, 18315801, 10235674,
+        3015864, 10235682, 18048354, 21544385, 18048367,  7588629,
+       42790174, 33937873, 35901407, 33937889, 15626907, 11944843,
+       21591872, 18622397,  7755823, 14457876,  4118822, 14245248]
+
+domain_visual_ids=[2, 1, 2, 1, 2, 1, 1, 2, 1, 2, 2, 1, 2, 1, 1, 2, 2, 1, 1, 3, 1, 2,
+       1, 2, 1, 3, 2, 1, 3, 1, 3, 1, 1, 2, 1, 2, 2, 3, 3, 1, 1, 3, 3, 1,
+       1, 2, 2, 3, 3, 1, 2, 3, 1, 2, 2, 1, 2, 1, 2, 3, 3, 1, 1, 2, 2, 1,
+       2, 1, 1, 3, 2, 3, 1, 2, 1, 2, 1, 2, 2, 1, 1, 2, 1, 2, 1, 2, 1, 2,
+       1, 2, 2, 1, 2, 1, 2, 1, 1, 3, 3, 1, 1, 3, 2, 3, 1, 2, 1, 2, 1, 2,
+       2, 1, 3, 1, 3, 1, 2, 3, 1, 2, 3, 1, 2, 1, 2, 1, 1, 2, 1, 3, 2, 1,
+       2, 1, 2, 3, 2, 1, 1, 3, 1, 3, 1, 3, 2, 1, 1, 2, 1, 3, 1, 3, 1, 3,
+       1, 2, 1, 3, 1, 2, 2, 1, 2, 1, 2, 1, 1, 3, 3, 1, 2, 1, 1, 2, 1, 2,
+       1, 2, 1, 2, 3, 2, 3, 1, 1, 2, 1, 2, 1, 2, 1, 2, 2, 3, 2, 1, 1, 2,
+       2, 1, 2, 1, 2, 1, 1, 3, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 3, 1, 3, 1,
+       3, 2, 3, 2, 1, 2, 1, 2, 1, 2, 3, 1, 1, 2, 2, 1, 3, 1, 1, 2, 2, 1,
+       1, 2, 1, 2, 1, 2, 2, 1, 3, 2, 3, 2, 1, 2, 3, 2, 1, 2, 3, 2, 2, 1,
+       1, 3, 1, 2, 2, 3, 1, 2, 1, 2, 2, 3, 2, 1, 1, 2, 3, 1, 2, 3, 1, 3,
+       2, 1, 2, 1, 1, 2, 2, 1, 2, 1, 3, 2, 3, 2, 2, 1, 2, 1, 2, 1, 1, 2,
+       1, 2, 2, 1]

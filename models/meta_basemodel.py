@@ -9,7 +9,6 @@ Author:
 from __future__ import print_function
 
 import time
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,20 +17,17 @@ import torch.utils.data as Data
 from sklearn.metrics import *
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+from .submodules import DNN_v2,MetaNet,test_visual_ids
 try:
     from tensorflow.python.keras.callbacks import CallbackList
 except ImportError:
     from tensorflow.python.keras._impl.keras.callbacks import CallbackList
 
 from deepctr_torch.inputs import build_input_features, SparseFeat, DenseFeat, VarLenSparseFeat, get_varlen_pooling_list, \
-    create_embedding_matrix, varlen_embedding_lookup
-from deepctr_torch.layers import PredictionLayer
+     varlen_embedding_lookup
+from deepctr_torch.layers import PredictionLayer,concat_fun
 from deepctr_torch.layers.utils import slice_arrays
 from deepctr_torch.callbacks import History
-
-
-
 
 
 
@@ -96,11 +92,64 @@ class Linear(nn.Module):
         return linear_logit
 
 
+def create_embedding_matrix(feature_columns, init_std=0.0001, linear=False, sparse=False, device='cpu', flag=None):
+    # Return nn.ModuleDict: for sparse features, {embedding_name: nn.Embedding}
+    # for varlen sparse features, {embedding_name: nn.EmbeddingBag}
+    sparse_feature_columns = list(
+        filter(lambda x: isinstance(x, SparseFeat), feature_columns)) if len(feature_columns) else []
+
+    varlen_sparse_feature_columns = list(
+        filter(lambda x: isinstance(x, VarLenSparseFeat), feature_columns)) if len(feature_columns) else []
+
+    embedding_dict = nn.ModuleDict(
+        {feat.embedding_name: nn.Embedding(feat.vocabulary_size, feat.embedding_dim if not linear else 1, sparse=sparse)
+         for feat in
+         sparse_feature_columns + varlen_sparse_feature_columns}
+    )
+
+    # for feat in varlen_sparse_feature_columns:
+    #     embedding_dict[feat.embedding_name] = nn.EmbeddingBag(
+    #         feat.dimension, embedding_size, sparse=sparse, mode=feat.combiner)
+
+    if flag and 'noembinit' in flag:
+        print('do not initialize embeddings')
+        pass
+    else:
+        for tensor in embedding_dict.values():
+            nn.init.normal_(tensor.weight, mean=0, std=init_std)
+
+    return embedding_dict.to(device)
+
+
 class BaseModel(nn.Module):
     def __init__(self, linear_feature_columns, dnn_feature_columns, l2_reg_linear=1e-5, l2_reg_embedding=1e-5,
-                 init_std=0.0001, seed=1024, task='binary', device='cpu', gpus=None):
+                 init_std=0.0001, seed=1024, task='binary', device='cpu', gpus=None,
+                 flag=None,domain_column=None,num_domains=None, meta_dnn_hidden_units=(32,64,32)):
 
         super(BaseModel, self).__init__()
+
+        #******************meta module**************************
+        self.flag = flag
+        self.domain_column = domain_column
+        self.embedding_dim = dnn_feature_columns[0].embedding_dim
+        if domain_column:
+
+            self.domain_embeddings = nn.Embedding(num_domains+1, self.embedding_dim)
+            self.meta_dnn_hidden_units = meta_dnn_hidden_units
+            meta_param_size=sum([meta_dnn_hidden_units[i]*meta_dnn_hidden_units[i+1] for i in range(len(meta_dnn_hidden_units)-1)])
+            map_dnn_size = [meta_param_size]
+            domain_dnn_input_dim = self.embedding_dim
+            self.domain_map_dnn = DNN_v2(domain_dnn_input_dim, map_dnn_size)
+            if 'metanorm' in self.flag:
+                self.meta_net = MetaNet(hidden_dim=self.embedding_dim,use_norm=True,meta_dnn_hidden_units=meta_dnn_hidden_units)
+            else:
+                self.meta_net = MetaNet(hidden_dim=self.embedding_dim,use_norm=False,meta_dnn_hidden_units=meta_dnn_hidden_units)
+            #******************meta module**************************
+
+
+
+
+
         torch.manual_seed(seed)
         self.dnn_feature_columns = dnn_feature_columns
 
@@ -116,7 +165,7 @@ class BaseModel(nn.Module):
             linear_feature_columns + dnn_feature_columns)
         self.dnn_feature_columns = dnn_feature_columns
 
-        self.embedding_dict = create_embedding_matrix(dnn_feature_columns, init_std, sparse=False, device=device)
+        self.embedding_dict = create_embedding_matrix(dnn_feature_columns, init_std, sparse=False, device=device, flag=flag)
         #         nn.ModuleDict(
         #             {feat.embedding_name: nn.Embedding(feat.dimension, embedding_size, sparse=True) for feat in
         #              self.dnn_feature_columns}
@@ -138,8 +187,18 @@ class BaseModel(nn.Module):
         self._ckpt_saved_epoch = False  # used for EarlyStopping in tf1.14
         self.history = History()
 
-    def fit(self, x=None, y=None, batch_size=None, epochs=1, verbose=1, initial_epoch=0, validation_split=0.,
-            validation_data=None, shuffle=True, callbacks=None,valid_cnt_per_epoch=None):
+    def meta_transformation(self, X, fm_input):
+        #generate domain embedding
+        domain_ids = X[:, self.feature_index[self.domain_column][0]].long()
+        domain_emb = self.domain_embeddings(domain_ids)
+        domain_emb = F.relu(domain_emb)
+        domain_vec = self.domain_map_dnn(domain_emb)
+
+        fm_input = self.meta_net(fm_input, domain_vec)
+        return fm_input
+
+    def fit(self, x=None, y=None, batch_size=None, epochs=1, valid_cnt_per_epoch=1,verbose=1, initial_epoch=0, validation_split=0.,
+            validation_data=None, shuffle=True, callbacks=None):
         """
 
         :param x: Numpy array of training data (if the model has a single input), or list of Numpy arrays (if the model has multiple inputs).If input layers in the model are named, you can also pass a
@@ -156,6 +215,9 @@ class BaseModel(nn.Module):
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
+        self.domain_id_offset = x[self.domain_column_list[0]].min()
+
+        print('new fit')
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
 
@@ -219,6 +281,7 @@ class BaseModel(nn.Module):
 
         sample_num = len(train_tensor_data)
         steps_per_epoch = (sample_num - 1) // batch_size + 1
+        steps_to_valid = steps_per_epoch//valid_cnt_per_epoch+1
 
         # configure callbacks
         callbacks = (callbacks or []) + [self.history]  # add history callback
@@ -240,6 +303,8 @@ class BaseModel(nn.Module):
             loss_epoch = 0
             total_loss_epoch = 0
             train_result = {}
+            trained_num = 0
+            step_num = 0
             try:
                 with tqdm(enumerate(train_loader), disable=verbose != 1) as t:
                     for _, (x_train, y_train) in t:
@@ -249,19 +314,16 @@ class BaseModel(nn.Module):
                         y_pred = model(x).squeeze()
 
                         optim.zero_grad()
-                        if isinstance(loss_func, list):
-                            assert len(loss_func) == self.num_tasks,\
-                                "the length of `loss_func` should be equal with `self.num_tasks`"
-                            loss = sum(
-                                [loss_func[i](y_pred[:, i], y[:, i], reduction='sum') for i in range(self.num_tasks)])
-                        else:
-                            loss = loss_func(y_pred, y.squeeze(), reduction='sum')
+                        loss = loss_func(y_pred, y.squeeze(), reduction='sum')
                         reg_loss = self.get_regularization_loss()
 
                         total_loss = loss + reg_loss + self.aux_loss
-
+                        if step_num%10==5 and 'test' in self.flag:
+                            print('\ntest out: %f' %total_loss.item())
+                            assert 1==0
                         loss_epoch += loss.item()
                         total_loss_epoch += total_loss.item()
+                        trained_num+=x.shape[0]
                         total_loss.backward()
                         optim.step()
 
@@ -271,7 +333,17 @@ class BaseModel(nn.Module):
                                     train_result[name] = []
                                 train_result[name].append(metric_fun(
                                     y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                            t.set_description(
+                                'Training Loss %.6f,totel Loss %.6f, reg_loss %.6f, aux_loss %.6f' % (total_loss.item()/x.shape[0], total_loss_epoch/trained_num,reg_loss/x.shape[0],self.aux_loss/x.shape[0]))
 
+                        step_num+=1
+                        if valid_cnt_per_epoch>1 and step_num%steps_to_valid==0:
+                            eval_result = self.evaluate(val_x, val_y, batch_size)
+                            eval_str = ''
+                            for name,result in eval_result.items():
+                                eval_str += " - " + name + \
+                                            ": {0: .4f}".format(result)
+                            print(f'Step: {step_num}/{steps_per_epoch}, {eval_str}')
 
             except KeyboardInterrupt:
                 t.close()
@@ -320,13 +392,13 @@ class BaseModel(nn.Module):
         :param batch_size: Integer or `None`. Number of samples per evaluation step. If unspecified, `batch_size` will default to 256.
         :return: Dict contains metric names and metric values.
         """
-        pred_ans = self.predict(x, batch_size)
+        pred_ans = self.predict(x, batch_size,y)
         eval_result = {}
         for name, metric_fun in self.metrics.items():
             eval_result[name] = metric_fun(y, pred_ans)
         return eval_result
 
-    def predict(self, x, batch_size=256):
+    def predict(self, x, batch_size=256,y=None,domain_ids=None):
         """
 
         :param x: The input data, as a Numpy array (or list of Numpy arrays if the model has multiple inputs).
@@ -346,12 +418,101 @@ class BaseModel(nn.Module):
             dataset=tensor_data, shuffle=False, batch_size=batch_size)
 
         pred_ans = []
+        if 'showattn' in self.flag:
+            self.attn_list_pos = [[0.0] * self.num_domains_list[0] for _ in range(self.domain_att_layer_num)]
+            self.attn_list_neg = [[0.0] * self.num_domains_list[0] for _ in range(self.domain_att_layer_num)]
+            self.attn_list_all = [[0.0] * self.num_domains_list[0] for _ in range(self.domain_att_layer_num)]
+            self.inst_attn_dict = []
+            offset=0
+
+        if 'instattn' in self.flag:
+            f=open(f'./inst_attn_{self.flag}.txt','w')
         with torch.no_grad():
-            for _, x_test in enumerate(test_loader):
+
+            for _, x_test in tqdm(enumerate(test_loader)):
                 x = x_test[0].to(self.device).float()
 
                 y_pred = model(x).cpu().data.numpy()  # .squeeze()
+
+
+
+                if 'showattn' in self.flag:
+                    batch_ids = [i for i in range(offset,offset+x.shape[0])]
+                    for i,idx in enumerate(batch_ids):
+                        break
+                        if idx in test_visual_ids:
+                            self.inst_attn_dict.append(model.domain_int_layers[0].normalized_att_scores.detach().cpu().numpy()[:,i,:,:])
+                            print(len(self.inst_attn_dict))
+
+                    y_label = y[offset:offset+x.shape[0]]
+                    domain_ids_batch = domain_ids[offset:offset+x.shape[0]]
+                    offset+=x.shape[0]
+                    if domain_ids.min()==1:
+                        bias=1
+                    else:
+                        bias=0
+                    for i in range(self.domain_att_layer_num):
+                        for j in range(self.num_domains_list[0]):
+                            self.attn_list_pos[i][j]+=model.domain_int_layers[i].normalized_att_scores.detach()[:,(y_label==1)&(domain_ids_batch==(j+bias)),::].sum(1)
+                            self.attn_list_neg[i][j]+=model.domain_int_layers[i].normalized_att_scores.detach()[:,(y_label==0)&(domain_ids_batch==(j+bias)),::].sum(1)
+                            self.attn_list_all[i][j]+=model.domain_int_layers[i].normalized_att_scores.detach()[:,(domain_ids_batch==(j+bias)),::].sum(1)
+
+                    if 'instattn' in self.flag:
+                        attn=model.domain_int_layers[0].normalized_att_scores.detach()
+                        for head_i in range(attn.shape[0]):
+                            for inst_i in range(attn.shape[1]):
+                                #print(attn.shape,attn[head_i][8][5])
+                                threshold=0.2
+                                if y_label[inst_i]==1 and x[inst_i][7].item()==3:
+                                    if (attn[head_i][inst_i][7][5]>threshold) and (attn[head_i][inst_i][7][15]>threshold) and x[inst_i][15]>10000 and x[inst_i][7]>=2:
+
+                                        print(7,5,15,attn[head_i][inst_i][7][5].item(),attn[head_i][inst_i][7][15].item(),y_label[inst_i].item(),y_pred[inst_i].item())
+                                        print('gender',x[inst_i][5].item(),'pvalue',x[inst_i][7].item(),'shopping_level',x[inst_i][8].item(),'price',x[inst_i][15].item(),self.classes_[int(x[inst_i][15].item())])
+                                        scores = attn[head_i][inst_i].detach().cpu().numpy().reshape(-1).tolist()
+                                        print('----', x[inst_i].detach().cpu().numpy().tolist())
+
+                                        s=[str(i) for i in scores]
+                                        f.write(f'score {y_pred[inst_i].item()},label {y_label[inst_i].item()},pvalue {int(x[inst_i][7].item())},price {self.classes_[int(x[inst_i][15].item())]}\n')
+                                        s = ','.join(s)+',\n'
+                                        f.write(s)
+                                        inst = x[inst_i].tolist()
+                                        inst = ','.join([str(i) for i in inst])+',\n'
+                                        f.write(inst)
+                                        f.flush()
+
+                                    #15,price, 5,gender,7 pvalue 8 shopping level 9 occupation
+                                    if (attn[head_i][inst_i][15][7]>threshold) and ((attn[head_i][inst_i][15][5]>threshold) or (attn[head_i][inst_i][15][8]>threshold)) and x[inst_i][15]>12000 and x[inst_i][7]>=2:
+                                        #print(attn[head_i])
+                                        print(15,7,5,8,attn[head_i][inst_i][15][7].item(),attn[head_i][inst_i][15][5].item(),attn[head_i][inst_i][15][8].item(),y_label[inst_i].item(),y_pred[inst_i].item())
+                                        print('gender',x[inst_i][5].item(),'pvalue',x[inst_i][7].item(),'shopping_level',x[inst_i][8].item(),'price',x[inst_i][15].item(),self.classes_[int(x[inst_i][15].item())])
+                                        scores = attn[head_i][inst_i].detach().cpu().numpy().reshape(-1).tolist()
+                                        print('----',x[inst_i].detach().cpu().numpy().tolist())
+
+                                        #for s in scores:
+                                        s=[str(i) for i in scores]
+                                        f.write(f'score {y_pred[inst_i].item()},label {y_label[inst_i].item()},pvalue {int(x[inst_i][7].item())},price {self.classes_[int(x[inst_i][15].item())]}\n')
+                                        s = ','.join(s)+',\n'
+                                        f.write(s)
+                                        inst = x[inst_i].tolist()
+                                        inst = ','.join([str(i) for i in inst])+',\n'
+                                        f.write(inst)
+                                        f.flush()
+
+
+
                 pred_ans.append(y_pred)
+
+
+        if 'showattn' in self.flag:
+            for i in range(self.domain_att_layer_num):
+                for j in range(self.num_domains_list[0]):
+                    self.attn_list_pos[i][j]/=((domain_ids==(j+bias))&(y==1)).sum()
+                    self.attn_list_pos[i][j]=self.attn_list_pos[i][j].cpu().numpy()
+                    self.attn_list_neg[i][j]/=((domain_ids==(j+bias))&(y==0)).sum()
+                    self.attn_list_neg[i][j]=self.attn_list_neg[i][j].cpu().numpy()
+                    self.attn_list_all[i][j]/=(domain_ids==(j+bias)).sum()
+                    self.attn_list_all[i][j]=self.attn_list_all[i][j].cpu().numpy()
+
 
         return np.concatenate(pred_ans).astype("float64")
 
@@ -466,22 +627,16 @@ class BaseModel(nn.Module):
 
     def _get_loss_func(self, loss):
         if isinstance(loss, str):
-            loss_func = self._get_loss_func_single(loss)
-        elif isinstance(loss, list):
-            loss_func = [self._get_loss_func_single(loss_single) for loss_single in loss]
+            if loss == "binary_crossentropy":
+                loss_func = F.binary_cross_entropy
+            elif loss == "mse":
+                loss_func = F.mse_loss
+            elif loss == "mae":
+                loss_func = F.l1_loss
+            else:
+                raise NotImplementedError
         else:
             loss_func = loss
-        return loss_func
-
-    def _get_loss_func_single(self, loss):
-        if loss == "binary_crossentropy":
-            loss_func = F.binary_cross_entropy
-        elif loss == "mse":
-            loss_func = F.mse_loss
-        elif loss == "mae":
-            loss_func = F.l1_loss
-        else:
-            raise NotImplementedError
         return loss_func
 
     def _log_loss(self, y_true, y_pred, eps=1e-7, normalize=True, sample_weight=None, labels=None):

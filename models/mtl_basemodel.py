@@ -103,6 +103,7 @@ class BaseModel(nn.Module):
         super(BaseModel, self).__init__()
         torch.manual_seed(seed)
         self.dnn_feature_columns = dnn_feature_columns
+        self.embedding_dim=dnn_feature_columns[0].embedding_dim
 
         self.reg_loss = torch.zeros((1,), device=device)
         self.aux_loss = torch.zeros((1,), device=device)
@@ -156,6 +157,9 @@ class BaseModel(nn.Module):
 
         :return: A `History` object. Its `History.history` attribute is a record of training loss values and metrics values at successive epochs, as well as validation loss values and validation metrics values (if applicable).
         """
+        bias = x[self.domain_column].min()
+
+
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
 
@@ -195,6 +199,8 @@ class BaseModel(nn.Module):
         for i in range(len(x)):
             if len(x[i].shape) == 1:
                 x[i] = np.expand_dims(x[i], axis=1)
+
+
 
         train_tensor_data = Data.TensorDataset(
             torch.from_numpy(
@@ -240,6 +246,8 @@ class BaseModel(nn.Module):
             loss_epoch = 0
             total_loss_epoch = 0
             train_result = {}
+            trained_num = 0
+
             try:
                 with tqdm(enumerate(train_loader), disable=verbose != 1) as t:
                     for _, (x_train, y_train) in t:
@@ -255,13 +263,16 @@ class BaseModel(nn.Module):
                             assert len(loss_func) == self.num_tasks,\
                                 "the length of `loss_func` should be equal with `self.num_tasks`"
                             #print(y_pred.shape,domain_ids.shape)
+                            #print(bias,y[domain_ids==(i+bias)].shape[0]!=0)
+                            #assert y[domain_ids==(i+bias)].shape[0]!=0
                             loss = sum(
-                                [loss_func[i](y_pred[:, i][domain_ids==(i+1)], y[domain_ids==(i+1)], reduction='sum') for i in range(self.num_tasks)])
+                                [loss_func[i](y_pred[:, i][domain_ids==(i+bias)], y[domain_ids==(i+bias)], reduction='sum') for i in range(self.num_tasks)])
                         else:
                             loss = loss_func(y_pred, y.squeeze(), reduction='sum')
                         reg_loss = self.get_regularization_loss()
 
                         total_loss = loss + reg_loss + self.aux_loss
+                        trained_num+=x.shape[0]
 
                         loss_epoch += loss.item()
                         total_loss_epoch += total_loss.item()
@@ -274,6 +285,8 @@ class BaseModel(nn.Module):
                                     train_result[name] = []
                                 train_result[name].append(metric_fun(
                                     y.cpu().data.numpy(), y_pred.cpu().data.numpy().astype("float64")))
+                            t.set_description(
+                                'Training Loss %.6f,totel Loss %.6f, reg_loss %.6f, aux_loss %.6f' % (total_loss.item()/x.shape[0], total_loss_epoch/trained_num,reg_loss/x.shape[0],self.aux_loss/x.shape[0]))
 
 
             except KeyboardInterrupt:
@@ -336,12 +349,16 @@ class BaseModel(nn.Module):
         :param batch_size: Integer. If unspecified, it will default to 256.
         :return: Numpy array(s) of predictions.
         """
+        bias = x[self.domain_column].min()
+
         model = self.eval()
         if isinstance(x, dict):
             x = [x[feature] for feature in self.feature_index]
         for i in range(len(x)):
             if len(x[i].shape) == 1:
                 x[i] = np.expand_dims(x[i], axis=1)
+
+
 
         tensor_data = Data.TensorDataset(
             torch.from_numpy(np.concatenate(x, axis=-1)))
@@ -357,8 +374,8 @@ class BaseModel(nn.Module):
                 y_pred = model(x).cpu().data.numpy()  # .squeeze()
 
                 y_out = np.zeros(y_pred.shape[0])
-                for i in range(domain_ids.max()):
-                    y_out[domain_ids==(i+1)]=y_pred[domain_ids==(i+1),i]
+                for i in range(self.num_tasks):
+                    y_out[domain_ids==(i+bias)]=y_pred[domain_ids==(i+bias),i]
 
 
                 pred_ans.append(y_out)
