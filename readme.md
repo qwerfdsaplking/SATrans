@@ -1,6 +1,5 @@
 ##Code for SATrans
 
-The processed Ali-CCP and Ali-Mama datasets can be downloaded from  **[link](https://drive.google.com/file/d/1PEQNOQqO3yTwU9WcdmeIZyfV7ViiemS9/view?usp=share_link)**. 
 
 
 ```
