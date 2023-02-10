@@ -14,11 +14,11 @@
 
 - Run SATrans(EN+MetaNet) on aliccp dataset  (Best performance)
 ```
-python main.py --data_name alicpp --model_name SATrans --seed 1025 --embedding_dim 32 --learning_rate 0.005 --domain_att_layer_num 3 --att_head_num 4 --meta_mode QK --domain_col 301 --flag sota
+python main.py --data_name alicpp --model_name SATrans --seed 1021 --embedding_dim 32 --learning_rate 0.005 --domain_att_layer_num 3 --att_head_num 4 --meta_mode QK --domain_col 301 --flag sota
 ```
 - Run SATrans(ENP+MetaNet) on alimama dataset  (use --flag to set "pos") (Best performance)
 ```
-python main.py --data_name alimama --model_name SATrans --seed 1025 --embedding_dim 32 --learning_rate 0.001 --domain_att_layer_num 3 --att_head_num 4 --meta_mode QK --domain_col shopping_level --flag sota-pos
+python main.py --data_name alimama --model_name SATrans --seed 1021 --embedding_dim 32 --learning_rate 0.001 --domain_att_layer_num 3 --att_head_num 4 --meta_mode QK --domain_col shopping_level --flag sota-pos
 ```
 
 
