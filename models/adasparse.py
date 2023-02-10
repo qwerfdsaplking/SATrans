@@ -9,7 +9,7 @@ Reference:
 import torch.nn as nn
 
 
-from .meta_trans_v2 import SelfAttention_Layer
+from .satrans import SelfAttention_Layer
 
 import torch
 from .basemodel import BaseModel

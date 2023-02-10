@@ -8,7 +8,7 @@ Reference:
 """
 import torch
 import torch.nn as nn
-from .meta_trans_v2 import SelfAttention_Layer
+from .satrans import SelfAttention_Layer
 from .mtl_basemodel import BaseModel
 from deepctr_torch.inputs import combined_dnn_input
 from deepctr_torch.layers import DNN, PredictionLayer

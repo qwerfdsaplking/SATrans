@@ -1,10 +1,10 @@
 import os.path
 import pickle
-
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from deepctr_torch.inputs import SparseFeat, DenseFeat, get_feature_names, VarLenSparseFeat
 from argparse import ArgumentParser
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 import warnings
 from utils import *
 from models.dcn import DCN
@@ -16,13 +16,15 @@ from models.fibinet import FiBiNET
 from models.afm import AFM
 from models.nfm import NFM
 from sklearn.metrics import roc_auc_score
-from models.satrans import SATrans,Star_Net
+from models.satrans import SATrans
+from models.star import Star_Net
 from models.sharedbottom import SharedBottom
 from models.mmoe import MMOE
 from models.ple import PLE
 from models.esmm import ESMM
 from models.wdl import WDL
 from models.adasparse import AdaSparse
+import time
 warnings.filterwarnings('ignore')
 
 
@@ -30,6 +32,8 @@ def boolean_string(s):
     if s not in {'False', 'True'}:
         raise ValueError('Not a valid boolean string')
     return s == 'True'
+
+
 
 
 def parse_args():
@@ -58,30 +62,6 @@ def parse_args():
 
 
 
-def get_ctr_df(path, cols, k=3):
-    print(cols)
-    h5_path = '~/data/alicpp.h5'
-    f = h5py.File(h5_path, 'r')
-    group = f[path]
-    data_dict = {}
-    for key in cols:
-        if key in ['10914', '11014', '15014', '12714']:
-            new_key = key + '_' + str(int(k))
-        else:
-            new_key = key
-        data_dict[key] = group[new_key][:]
-    return data_dict
-
-
-
-def get_sub_context(data_dict, cid):
-    idx = data_dict['301'] == cid
-    sub_data_dict = {}
-    for key in data_dict:
-        sub_data_dict[key] = data_dict[key][idx]
-    print('all num', idx.shape[0], f'sub {cid} num', idx.sum())
-    return sub_data_dict
-
 
 if __name__ == '__main__':
     print('starting...++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++')
@@ -106,6 +86,7 @@ if __name__ == '__main__':
     postfix = ''
     valid_cnt_per_epoch = 1
 
+    #domain_col denotes scenario features
     default_domain_col_dict = {'alicpp': '301', 'alimama': 'pid'}
     if domain_col == 'None':
         domain_col = default_domain_col_dict[data_name.split('_')[0]]
@@ -113,7 +94,7 @@ if __name__ == '__main__':
 
     #
     if data_name == 'alicpp':
-        # domain id 从1开始
+        # domain id starts from 1
         labels = ['click']
         sparse_features = ['101', '121', '122', '124', '125', '126', '127', '128', '129', '205', '206', '207', '210',
                            '216',
@@ -122,9 +103,9 @@ if __name__ == '__main__':
         var_features = []
         dense_features = []
         topk = 3
-        train_all = get_ctr_df('ctr_train' + postfix, labels + sparse_features + var_features, k=topk)
+        train_all = get_aliccp_ctr_df('ctr_train' + postfix, labels + sparse_features + var_features, k=topk)
         print('load train finish')
-        test_all = get_ctr_df('ctr_test' + postfix, labels + sparse_features + var_features, k=topk)
+        test_all = get_aliccp_ctr_df('ctr_test' + postfix, labels + sparse_features + var_features, k=topk)
         print('load test finish')
 
 
@@ -136,13 +117,7 @@ if __name__ == '__main__':
             print(pd.Series(test_all[domain_col]).value_counts())
 
 
-        def cal_ctr(data_dict):
-            data_df = pd.DataFrame(data_dict)
-            for col in data_df.columns:
-                if data_df[col].nunique() < 20 and col != labels[0]:
-                    data_agg = data_df.groupby(col)['click'].agg('mean')
-                    # print(data_agg)
-                    print(col, data_agg.std())
+
 
 
         # size of embedding matrices
@@ -160,15 +135,7 @@ if __name__ == '__main__':
 
     elif data_name == 'alimama':
 
-        def loadh52df(hdf5_path):
-            import h5py
-            print('load %s ...' % hdf5_path)
-            f = h5py.File(hdf5_path, 'r')
-            dic = {}
-            for col in f.keys():
-                dic[col] = f[col][:]
-            f.close()
-            return pd.DataFrame(dic)
+
 
 
         data = loadh52df('../../data/alimama.h5')
@@ -178,29 +145,19 @@ if __name__ == '__main__':
                            'cate_id', 'campaign_id', 'customer', 'brand']
         var_features = []
 
-        if 'sparseprice' in flag:#transformer dense feature price as sparse feature
+        if 'sparseprice' in flag:# dense feature price as sparse feature
             print('transform price')
-            sparse_features=['user_id', 'adgroup_id', 'pid', 'cms_segid', 'cms_group_id', 'final_gender_code',
-                           'age_level', 'pvalue_level', 'shopping_level', 'occupation', 'new_user_class_level',
-                           'cate_id', 'campaign_id', 'customer', 'brand','price']
+            sparse_features.append('price')
             dense_features=[]
-            from sklearn.preprocessing import LabelEncoder, MinMaxScaler
             lbe = LabelEncoder()
-            t=data['price']
             data['price'] = lbe.fit_transform(data['price'])
-
-
         else:
             dense_features = ['price']
             mms = MinMaxScaler(feature_range=(0, 1))
             data[dense_features] = mms.fit_transform(data[dense_features])
 
-        #if data[domain_col].min() == 0:
-        #    data[domain_col] += 1
         if len(domain_col_list) == 1:
             print(data[domain_col].value_counts())
-
-        import time
 
         split_time_stamp = '2017-05-12 00:00:00'
         ts = time.mktime(time.strptime(split_time_stamp, "%Y-%m-%d %H:%M:%S"))
@@ -209,8 +166,6 @@ if __name__ == '__main__':
         data_max = dict()
         for key in data.columns:
             data_max[key] = data[key].max()
-
-
         if len(domain_col_list) == 1:
             num_domains = max(pd.Series(train_all[domain_col]).nunique(), data_max[domain_col])
 
@@ -221,6 +176,9 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError('not implemented')
 
+
+
+    #feature transformation of deepctr
     fixlen_feature_columns = [SparseFeat(feat, vocabulary_size=int(data_max[feat]) + 2, embedding_dim=embedding_dim)
                               for i, feat in enumerate(sparse_features)] + [DenseFeat(feat, 1)
                                                                             for feat in dense_features]
@@ -238,9 +196,8 @@ if __name__ == '__main__':
         # device='cpu'
 
 
-    if 'Star_Trans' in model_name:
-        model_path = f'./checkpoints/{model_name}_{embedding_dim}_{learning_rate}_{domain_att_layer_num}_{att_head_num}_{merge}_{seed}_{domain_col}_{flag}.pt'
-    elif 'Meta_Trans' in model_name:
+
+    if 'SATrans' in model_name:
         model_path=f'./checkpoints/{model_name}_{embedding_dim}_{learning_rate}_{domain_att_layer_num}_{att_head_num}_{meta_mode}_{seed}_{domain_col}_{flag}.pt'
     elif 'AutoInt' in model_name:
         model_path=f'./checkpoints/{model_name}_{embedding_dim}_{learning_rate}_{att_layer_num}_{att_head_num}_{att_layer_type}_{seed}_{domain_col}_{flag}.pt'
@@ -323,8 +280,6 @@ if __name__ == '__main__':
                          seed=seed,
                          device=device,flag=flag)
 
-
-
     elif model_name == 'SATrans':
         att_layer_num = 0
         use_dnn = False
@@ -357,7 +312,7 @@ if __name__ == '__main__':
 
 
     print(f'=============={data_name}=====================================================')
-    print(f'model name: {model_name}..{flag}..{seed}.{domain_col}...====================================')
+    print(f'model name: {model_name}..{flag}..{seed}...{domain_col}...====================================')
     print('===========================================================================')
 
     # Mix learning
@@ -376,7 +331,7 @@ if __name__ == '__main__':
     else:
         validation_data = None
 
-    if data_name=='alimama':
+    if data_name=='alimama' and 'sparseprice' in flag:
         model.classes_ = lbe.classes_
     # model.cpu()
 
@@ -405,13 +360,11 @@ if __name__ == '__main__':
 
     test_auc_list.append(str(test_auc))
     print("test AUC", test_auc)
-    if data_name == 'alicpp':
-        domain_col_show = '301'
-        num_domains = 3
-    elif data_name=='alimama':
-        domain_col_show=domain_col
-    else:
-        domain_col_show = domain_col
+
+
+
+
+    domain_col_show = domain_col
     for i in range(test_model_input[domain_col_show].min(), test_model_input[domain_col_show].max() + 1):
         domain_indice = test_model_input[domain_col_show] == i
         domain_pred = pred_ans[domain_indice]

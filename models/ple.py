@@ -12,7 +12,7 @@ import torch.nn as nn
 from .mtl_basemodel import BaseModel
 from deepctr_torch.inputs import combined_dnn_input
 from deepctr_torch.layers import DNN, PredictionLayer
-from .meta_trans_v2 import SelfAttention_Layer
+from .satrans import SelfAttention_Layer
 
 
 def concat_fun(inputs, axis=-1):
