@@ -297,7 +297,6 @@ def process_history():
 
 
 
-#直接read_csv,然后合并，然后int转化，然后取最小值，然后减去最小值+1
 
 
 if __name__ == "__main__":
