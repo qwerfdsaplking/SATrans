@@ -1,6 +1,8 @@
 ## Code for SATrans
 
 The source code for our paper "Scenario-Adaptive Feature Interaction for Click-Through Rate Prediction" (accepted by KDD2023 Applied Science Track).
+The preprocessed dataset can be downloaded from [link](https://drive.google.com/file/d/1PEQNOQqO3yTwU9WcdmeIZyfV7ViiemS9/view?usp=sharing).
+
 
 ```
 --data_name: name of dataset
@@ -32,4 +34,14 @@ python main.py --data_name alimama --model_name SATrans --seed 1021 --embedding_
 - scikit-learn==1.0.1
 
 
-
+## Reference
+Please cite the paper whenever this code is used to produce published results or incorporated into other software:
+```
+@inproceedings{min2023scenario,
+  title={Scenario-Adaptive Feature Interaction for Click-Through Rate Prediction},
+  author={Min, Erxue and Luo, Da and Lin, Kangyi and Huang, Chunzhen and Liu, Yang},
+  booktitle={Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining},
+  pages={4661--4672},
+  year={2023}
+}
+```
